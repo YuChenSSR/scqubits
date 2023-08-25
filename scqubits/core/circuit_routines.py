@@ -2866,17 +2866,14 @@ class CircuitRoutines(ABC):
                 wf_dim = self.var_categories_list.index(var_index)
             else:
                 wf_dim = self._get_var_dim_for_reshaped_wf(var_indices, var_index)
-                
+
             var_basis = self._basis_for_var_index(var_index)
 
             if var_basis == "harmonic":
                 wf_ext_basis = self._basis_change_harm_osc_to_phi(
                     wf_ext_basis, wf_dim, var_index, grids_dict[var_index]
                 )
-            elif (
-                var_basis == "periodic"
-                and change_discrete_charge_to_phi
-            ):
+            elif var_basis == "periodic" and change_discrete_charge_to_phi:
                 wf_ext_basis = self._basis_change_n_to_phi(
                     wf_ext_basis, wf_dim, var_index, grids_dict[var_index]
                 )
