@@ -477,8 +477,7 @@ class CircuitRoutines(ABC):
             self
         """
         setattr(self, attr_name, value)
-        if hasattr(self, "hierarchical_diagonalization"):
-            self.update()
+        self.update()
         return self
 
     def sync_parameters_with_parent(self):
@@ -1553,6 +1552,9 @@ class CircuitRoutines(ABC):
         -------
             operator identified by `operator_name`
         """
+        # update the circuit if necessary
+        self.update()
+
         if not self.hierarchical_diagonalization:
             # if the operator_name is a Qsn operator (which is possible when self is a
             # purely harmonic subsystem when using HD) then return the operator
@@ -1571,11 +1573,6 @@ class CircuitRoutines(ABC):
         subsystem = self.subsystems[subsystem_index]
         subsys_bare_esys = None
         if bare_esys and subsystem.hierarchical_diagonalization:
-            if subsystem.affected_subsystem_indices != []:
-                subsystem.hilbert_space.generate_bare_esys(
-                    update_subsystem_indices=subsystem.affected_subsystem_indices
-                )
-                subsystem.affected_subsystem_indices = []
             subsys_bare_esys = {
                 sys_index: (
                     subsystem.hilbert_space["bare_evals"][sys_index][0],
@@ -1831,6 +1828,9 @@ class CircuitRoutines(ABC):
         evals_count:
             Number of eigenenergies
         """
+        # update the circuit
+        self.update()
+
         normal_mode_freqs = self.normal_mode_freqs
         excitations = [np.arange(evals_count) for i in self.var_categories["extended"]]
         energy_array = sum(
@@ -1913,10 +1913,7 @@ class CircuitRoutines(ABC):
         Returns the Hamiltonian of the Circuit.
         """
         # update the circuit if necessary
-        if (not hasattr(self, "parent") and self._user_changed_parameter) or (
-            self.hierarchical_diagonalization and self._out_of_sync
-        ):
-            self.update()
+        self.update()
 
         if not self.hierarchical_diagonalization:
             if self.is_purely_harmonic:
