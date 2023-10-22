@@ -845,7 +845,37 @@ class ParameterSweepBase(ABC, SpectrumLookupMixin):
         )
         self._data[sweep_name] = matrix_element_data
 
+    def store_data(self, **kwargs):
+        """
+        Store data to the ParameterSweep object. The data is subsequently
+        accessible through <ParameterSweep>[<data_name>].
 
+        Parameters
+        ----------
+        kwargs:
+            keyword arguments of the form <data_name>=<data>
+
+        Returns
+        -------
+            None
+        """
+        for data_name, data in kwargs.items():
+            data = np.array(data)
+            if not (np.array(np.array(data.shape[: len(self.parameters)]) 
+                == self.parameters.counts)).all():
+                raise ValueError(f"The input data {data_name}'s shape does not match the" 
+                                 " shape of the swept parameters.")
+            
+            if data_name not in self._data.keys():
+                settings.DISPATCH_ENABLED = False
+
+            self._data[data_name] = NamedSlotsNdarray(data, self.parameters.paramvals_by_name)
+
+            if not settings.DISPATCH_ENABLED:
+                settings.DISPATCH_ENABLED = True
+
+
+ 
 class ParameterSweep(  # type:ignore
     ParameterSweepBase, dispatch.DispatchClient, serializers.Serializable
 ):
@@ -878,14 +908,20 @@ class ParameterSweep(  # type:ignore
         information is specified by a dictionary of the following form::
 
             {
-                "<parameter name 1>": [<subsystem a>],
-                "<parameter name 2>": [<subsystem b>, <subsystem c>, ...],
+                "<parameter name 1>": [<subsystem a>, <subsystem b>],
+                "<parameter name 2>": [],
+                "<parameter name 3>": None,
                 ...
             }
 
-        This indicates that changes in `<parameter name 1>` only require updates of
-        `<subsystem a>` while leaving other subsystems unchanged. Similarly, sweeping
-        `<parameter name 2>` affects `<subsystem b>`, `<subsystem c>` etc.
+        This indicates that 
+         - changes in `<parameter name 1>` only require updates of `<subsystem a>` and 
+         `<subsystem b>` while leaving other subsystems unchanged. 
+         - changes in `<parameter name 2>` affect none of the subsystems while require an 
+         update of the joint system.
+         - changes in `<parameter name 3>` affect none of the subsystems and the joint 
+         system.
+    
     bare_only:
         if set to True, only bare eigendata is calculated; useful when performing a
         sweep for a single quantum system, no interaction (default: False)
@@ -939,7 +975,7 @@ class ParameterSweep(  # type:ignore
         paramvals_by_name: Dict[str, ndarray],
         update_hilbertspace: Callable,
         evals_count: int = 20,
-        subsys_update_info: Optional[Dict[str, List[QuantumSystem]]] = None,
+        subsys_update_info: Optional[Dict[str, Union[List[QuantumSystem], None]]] = None,
         bare_only: bool = False,
         ignore_low_overlap: bool = False,
         autorun: bool = settings.AUTORUN_SWEEP,
@@ -1043,6 +1079,7 @@ class ParameterSweep(  # type:ignore
                 self._data["lamb"],
                 self._data["chi"],
                 self._data["kerr"],
+                self._data["chi_prime"],
             ) = self._dispersive_coefficients()
         if self._deepcopy:
             self._hilbertspace = stored_hilbertspace  # restore original state
@@ -1095,15 +1132,27 @@ class ParameterSweep(  # type:ignore
         esys_array[1] = evecs
         return esys_array
 
-    def _paramnames_no_subsys_update(self, subsystem) -> List[str]:
+    def _paramnames_no_subsys_update(self, subsystem) -> List[str]:       
         if self._subsys_update_info is None:
             return []
-        updating_parameters = [
-            name
-            for name in self._subsys_update_info.keys()
-            if subsystem in self._subsys_update_info[name]
-        ]
-        return list(set(self._parameters.names) - set(updating_parameters))
+        
+        parameters_no_update = []
+        for name in self.parameters.names:
+            # Assume changing parameters with no update info WILL update all subsystems. 
+            if name not in self._subsys_update_info.keys():
+                continue
+
+            info = self._subsys_update_info[name]
+
+            # Changing parameters with None as update info WILL NOT update any subsystems.
+            if info is None:
+                parameters_no_update.append(name)
+                continue
+
+            if subsystem not in info and subsystem.id_str not in info:
+                parameters_no_update.append(name)
+
+        return parameters_no_update
 
     def _subsys_bare_spectrum_sweep(self, subsystem) -> ndarray:
         """
@@ -1120,7 +1169,7 @@ class ParameterSweep(  # type:ignore
         """
         fixed_paramnames = self._paramnames_no_subsys_update(subsystem)
         reduced_parameters = self._parameters.create_reduced(fixed_paramnames)
-        total_count = np.prod([len(param_vals) for param_vals in reduced_parameters])
+        total_count = np.prod(reduced_parameters.counts)
 
         target_map = cpu_switch.get_map_method(self._num_cpus)
 
@@ -1184,6 +1233,17 @@ class ParameterSweep(  # type:ignore
         esys_array[0] = evals
         esys_array[1] = evecs
         return esys_array
+    
+    def _paramnames_no_joint_sys_update(self) -> List[str]:       
+        if self._subsys_update_info is None:
+            return []
+        
+        parameters_no_update = [
+            name for name, info in self._subsys_update_info.items()
+            if info is None
+        ]
+
+        return parameters_no_update
 
     def _dressed_spectrum_sweep(
         self,
@@ -1195,8 +1255,12 @@ class ParameterSweep(  # type:ignore
             NamedSlotsNdarray[<paramname1>, <paramname2>, ...] of eigenvalues,
             likewise for eigenvectors
         """
+
+        fixed_paramnames = self._paramnames_no_joint_sys_update()
+        reduced_parameters = self._parameters.create_reduced(fixed_paramnames)
+
         target_map = cpu_switch.get_map_method(self._num_cpus)
-        total_count = np.prod(self._parameters.counts)
+        total_count = np.prod(reduced_parameters.counts)
 
         with utils.InfoBar(
             "Parallel compute dressed eigensys [num_cpus={}]".format(self._num_cpus),
@@ -1211,7 +1275,7 @@ class ParameterSweep(  # type:ignore
                             self._evals_count,
                             self._update_hilbertspace,
                         ),
-                        itertools.product(*self._parameters.ranges),
+                        itertools.product(*reduced_parameters.ranges),
                     ),
                     total=total_count,
                     desc="Dressed spectrum",
@@ -1222,8 +1286,17 @@ class ParameterSweep(  # type:ignore
 
         spectrum_data_ndarray = np.asarray(spectrum_data, dtype=object)
         spectrum_data_ndarray = spectrum_data_ndarray.reshape(
-            (*self._parameters.counts, 2)
+            (*reduced_parameters.counts, 2)
         )
+
+        # Dressed spectral data was only computed once for each parameter that has no
+        # update effect on the joint system. Now extend the array to reflect this
+        # for the full parameter array by repeating
+        for name in fixed_paramnames:
+            index = self._parameters.index_by_name[name]
+            param_count = self._parameters.counts[index]
+            spectrum_data_ndarray = np.repeat(spectrum_data_ndarray, param_count, axis=index)
+
         slotparamvals_by_name = OrderedDict(self._parameters.ordered_dict.copy())
 
         evals = np.asarray(spectrum_data_ndarray[..., 0].tolist())
@@ -1233,6 +1306,104 @@ class ParameterSweep(  # type:ignore
             NamedSlotsNdarray(evals, slotparamvals_by_name),
             NamedSlotsNdarray(evecs, slotparamvals_by_name),
         )
+
+    def _sweep_function_keyword_modify(
+            self, 
+            sweep_function: Callable, 
+            update_hilbertspace: bool
+        ):
+        """
+        Support different keyword arguments for receiving parameters from the generator. 
+        For example, those are supported keywords and the value feeded to it when iterating
+         - paramindex_tuple / idx: a tuple containing multi-dimensional indices
+         - paramvals_tuple / vals: a tuple containing the parameter values
+
+        Returns
+        -------
+        A function for generating custom sweep with arguement (parametersweep, 
+        paramindex_tuple, paramvals_tuple, **kwargs) 
+        """
+        arguement_name = inspect.signature(sweep_function).parameters.keys()
+
+        def desired_func(parametersweep, paramindex_tuple, paramvals_tuple, **kwargs):
+            if update_hilbertspace:
+                self._update_hilbertspace(self, *paramvals_tuple)
+
+            kwargs_to_pass = {}
+            if "paramindex_tuple" in arguement_name:
+                kwargs_to_pass["paramindex_tuple"] = paramindex_tuple
+            if "idx" in arguement_name:
+                kwargs_to_pass["idx"] = paramindex_tuple
+            if "paramvals_tuple" in arguement_name:
+                kwargs_to_pass["paramvals_tuple"] = paramvals_tuple
+            if "vals" in arguement_name:
+                kwargs_to_pass["vals"] = paramvals_tuple
+
+            return sweep_function(parametersweep, **kwargs_to_pass, **kwargs)
+
+        return desired_func
+
+    def add_sweep(
+        self, 
+        sweep_function: Union[str, Callable], 
+        sweep_name: Optional[str] = None, 
+        update_hilbertspace: bool = True, 
+        **kwargs
+    ) -> None:
+        """
+        Add a new sweep to the ParameterSweep object. The generated data is
+        subsequently accessible through <ParameterSweep>[<sweep_function>] or
+        <ParameterSweep>[<sweep_name>]
+
+        Parameters
+        ----------
+        sweep_function:
+            name of a sweep function in scq.sweeps as str, or custom function (
+            callable) provided by the user. When iterating the calculation of 
+            sweep_function, the multi-dimensional indices will be fed to 
+            sweep_function's keyword argument paramindex_tuple or idx if exist, and 
+            the corresponding parameter values will be fed to paramvals_tuple or vals if 
+            exist.
+        sweep_name:
+            if given, the generated data is stored in <ParameterSweep>[<sweep_name>]
+            rather than [<sweep_name>]
+        update_hilbertspace:
+            if true, updated HilbertSpace object can be accessed in the sweep_funciton via
+            <ParameterSweep>.hilberspace. 
+        kwargs:
+            keyword arguments handed over to the sweep function
+
+        Returns
+        -------
+            None
+        """
+        if not callable(sweep_function):
+            super().add_sweep(sweep_function, sweep_name, **kwargs)
+            return
+
+        if update_hilbertspace:
+            if self._deepcopy:
+                instance_str = dill.dumps(self.hilbertspace)
+                stored_hilbertspace = dill.loads(instance_str)
+                self._hilbertspace = dill.loads(instance_str)
+            else:
+                # warnings.warn(
+                #     "Updating the original hilbertspace may cause the generated spectrum "
+                #     "data outdated, potentially leading to incorrect results. "
+                #     "Try initializing the ParameterSweep with arguement deepcopy = True.",
+                #     Warning
+                # )
+                # self.cause_dispatch()
+                pass
+            settings.DISPATCH_ENABLED = False
+
+        modified_func = self._sweep_function_keyword_modify(sweep_function, update_hilbertspace)
+        super().add_sweep(modified_func, sweep_name, **kwargs)
+
+        if update_hilbertspace:
+            if self._deepcopy:
+                self._hilbertspace = stored_hilbertspace  # restore original state
+            settings.DISPATCH_ENABLED = True
 
     def _energies_1(self, subsys):
         bare_label = np.zeros(len(self.hilbertspace))
@@ -1263,12 +1434,13 @@ class ParameterSweep(  # type:ignore
 
     def _dispersive_coefficients(
         self,
-    ) -> Tuple[NamedSlotsNdarray, NamedSlotsNdarray, NamedSlotsNdarray]:
+    ) -> Tuple[NamedSlotsNdarray, NamedSlotsNdarray, NamedSlotsNdarray, NamedSlotsNdarray]:
         energy_0 = self[:].energy_by_dressed_index(0).toarray()
 
         lamb_data = np.empty(self.subsystem_count, dtype=object)
         kerr_data = np.empty((self.subsystem_count, self.subsystem_count), dtype=object)
         chi_data = np.empty((self.subsystem_count, self.subsystem_count), dtype=object)
+        chi_prime_data = np.empty((self.subsystem_count, self.subsystem_count), dtype=object)
 
         # Lamb shifts
         for subsys_index1, subsys1 in enumerate(self.hilbertspace):
@@ -1280,9 +1452,16 @@ class ParameterSweep(  # type:ignore
                 - bare_energy_subsys1_all_l1
                 + bare_energy_subsys1_all_l1[..., 0][..., None]
             )
-            lamb_data[subsys_index1] = NamedSlotsNdarray(
-                lamb_subsys1_all_l1, self._parameters.paramvals_by_name
-            )
+            # Lamb shifts for oscillator modes
+            if subsys1 in self.osc_subsys_list:
+                lamb_data[subsys_index1] = NamedSlotsNdarray(
+                    lamb_subsys1_all_l1[..., 1], self._parameters.paramvals_by_name
+                )
+            # Lamb shifts for qubit modes
+            else:
+                lamb_data[subsys_index1] = NamedSlotsNdarray(
+                    lamb_subsys1_all_l1, self._parameters.paramvals_by_name
+                )
 
         # Kerr and ac Stark
         for subsys_index1, subsys1 in enumerate(self.hilbertspace):
@@ -1307,6 +1486,7 @@ class ParameterSweep(  # type:ignore
                         self._parameters.paramvals_by_name,
                     )
                     chi_data[subsys_index1, subsys_index2] = np.asarray([])
+                    chi_prime_data[subsys_index1, subsys_index2] = np.asarray([])
                 # self-Kerr and cross-Kerr: qubit modes
                 elif (
                     subsys1 in self.qbt_subsys_list and subsys2 in self.qbt_subsys_list
@@ -1316,19 +1496,32 @@ class ParameterSweep(  # type:ignore
                         self._parameters.paramvals_by_name,
                     )
                     chi_data[subsys_index1, subsys_index2] = np.asarray([])
+                    chi_prime_data[subsys_index1, subsys_index2] = np.asarray([])
                 # ac Stark shifts
                 else:
-                    if subsys1 in self.qbt_subsys_list:
+                    if subsys1 in self.osc_subsys_list:
                         chi_data[subsys_index1, subsys_index2] = NamedSlotsNdarray(
                             kerr_subsys1_subsys2_all_l1_l2[..., 1, :],
                             self._parameters.paramvals_by_name,
                         )
+                        chi_prime_data[subsys_index1, subsys_index2] = NamedSlotsNdarray(
+                            kerr_subsys1_subsys2_all_l1_l2[..., 2, :]
+                            - 2 * kerr_subsys1_subsys2_all_l1_l2[..., 1, :],
+                            self._parameters.paramvals_by_name,
+                        ) / 2
+
                     else:
                         chi_data[subsys_index1, subsys_index2] = NamedSlotsNdarray(
                             kerr_subsys1_subsys2_all_l1_l2[..., :, 1],
                             self._parameters.paramvals_by_name,
                         )
+                        chi_prime_data[subsys_index1, subsys_index2] = NamedSlotsNdarray(
+                            kerr_subsys1_subsys2_all_l1_l2[..., :, 2]
+                            - 2 * kerr_subsys1_subsys2_all_l1_l2[..., :, 1],
+                            self._parameters.paramvals_by_name,
+                        ) / 2
                     kerr_data[subsys_index1, subsys_index2] = np.asarray([])
+
 
         sys_indices = np.arange(self.subsystem_count)
         lamb_data = NamedSlotsNdarray(lamb_data, {"subsys": sys_indices})
@@ -1338,8 +1531,11 @@ class ParameterSweep(  # type:ignore
         chi_data = NamedSlotsNdarray(
             chi_data, {"subsys1": sys_indices, "subsys2": sys_indices}
         )
+        chi_prime_data = NamedSlotsNdarray(
+            chi_prime_data, {"subsys1": sys_indices, "subsys2": sys_indices}
+        )
 
-        return lamb_data, chi_data, kerr_data
+        return lamb_data, chi_data, kerr_data, chi_prime_data
 
 
 class StoredSweep(
@@ -1464,7 +1660,7 @@ def generator(sweep: "ParameterSweepBase", func: Callable, **kwargs) -> np.ndarr
         )
     )
     element_shape: Tuple[int, ...] = tuple()
-    if isinstance(data_array[0], np.ndarray):
+    if isinstance(data_array[0], np.ndarray | Qobj):
         element_shape = data_array[0].shape
 
     data_ndarray = np.asarray(data_array)
