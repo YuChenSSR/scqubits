@@ -184,6 +184,24 @@ def check_sync_status(func: Callable) -> Callable:
     return wrapper
 
 
+def check_sync_status_circuit(func: Callable) -> Callable:
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        if (not hasattr(self, "parent") and self._user_changed_parameter) or (
+            self.hierarchical_diagonalization and self._out_of_sync
+        ):
+            raise Exception(
+                "[scqubits] Circuit or Subsystem parameters have been changed and/or "
+                " the parameter/s in the current instance are is/are out of sync. "
+                " Please run:"
+                " <Circuit>.update().",
+                Warning,
+            )
+        return func(self, *args, **kwargs)
+
+    return wrapper
+
+
 def check_lookup_exists(func: Callable) -> Callable:
     @functools.wraps(func)
     def wrapper(self, *args, **kwargs):
@@ -421,6 +439,22 @@ def flatten_list_recursive(some_list: list) -> list:
             some_list[1:]
         )
     return some_list[:1] + flatten_list_recursive(some_list[1:])
+
+
+def unique_elements_in_list(list_object: list) -> list:
+    """
+    Returns a list of all the unique elements in the list
+
+    Parameters
+    ----------
+    list_object :
+        A list of any objects
+    """
+    unique_list = []
+    for element in list_object:
+        if element not in unique_list:
+            unique_list.append(element)
+    return unique_list
 
 
 def number_of_lists_in_list(list_object: list) -> int:

@@ -12,7 +12,6 @@
 
 import copy
 import dill
-import dill
 import functools
 import inspect
 import itertools
@@ -1002,7 +1001,10 @@ class ParameterSweep(  # type:ignore
         dispatch.CENTRAL_DISPATCH.register("HILBERTSPACE_UPDATE", self)
 
         global _faulty_interactionterm_warning_issued
-        if self.faulty_interactionterm_suspected() and not _faulty_interactionterm_warning_issued:
+        if (
+            self.faulty_interactionterm_suspected()
+            and not _faulty_interactionterm_warning_issued
+        ):
             warnings.warn(
                 "The interactions specified for this HilbertSpace object involve coupling operators stored as fixed "
                 "matrices. This may be unintended, as the operators of quantum systems (specifically, their "
