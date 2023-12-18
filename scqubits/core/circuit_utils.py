@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Callable, List, Union, Optional, Tuple, D
 import numpy as np
 import scipy as sp
 import sympy as sm
+import qutip as qt
 from numpy import ndarray
 from scipy import sparse
 from scipy.sparse import csc_matrix
@@ -419,9 +420,15 @@ def example_circuit(qubit: str) -> str:
 
 def grid_operator_func_factory(inner_op: Callable, index: int) -> Callable:
     def operator_func(self: "Subsystem"):
-        return self._kron_operator(
-            inner_op(self.grids_dict_for_discretized_extended_vars()[index]), index
-        )
+        if not self.hierarchical_diagonalization:
+            return self._kron_operator(
+                inner_op(self.grids_dict_for_discretized_extended_vars()[index]), index
+            )
+        else:
+            operator = self.identity_wrap_for_hd(
+                inner_op(self.grids_dict_for_discretized_extended_vars()[index]), index
+            )
+            return operator.to("csr") if qt.__version__ >= '5.0.0' else operator.data.tocsc()
 
     return operator_func
 
@@ -448,7 +455,10 @@ def operator_func_factory(
                 inner_op(self.cutoffs_dict()[index], prefactor=prefactor), index
             )
         else:
-            return self._kron_operator(inner_op(self.cutoffs_dict()[index]), index)
+            operator = self.identity_wrap_for_hd(
+                inner_op(self.cutoffs_dict()[index]), index
+            )
+            return operator.to("csr") if qt.__version__ >= '5.0.0' else operator.data.tocsc()
 
     return operator_func
 
