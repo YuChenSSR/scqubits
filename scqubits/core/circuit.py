@@ -40,8 +40,6 @@ from scqubits.core.circuit_utils import (
     is_potential_term,
 )
 from scqubits.core.symbolic_circuit import Branch, SymbolicCircuit
-from scqubits.io_utils.fileio import IOData
-from scqubits.io_utils.fileio_serializers import dict_serialize
 from scqubits.utils.misc import (
     flatten_list,
     number_of_lists_in_list,
@@ -117,7 +115,10 @@ class Subsystem(
         self._H_LC_str_harmonic = None
         # attribute to keep track if the symbolic Hamiltonian needs to be updated
         self._make_property(
-            "_user_changed_parameter", False, "update_user_changed_parameter"
+            "_user_changed_parameter",
+            False,
+            "update_user_changed_parameter",
+            use_central_dispatch=False,
         )
 
         self._make_property("ext_basis", ext_basis, "update_ext_basis")
@@ -178,7 +179,7 @@ class Subsystem(
             system_hierarchy != [] and number_of_lists_in_list(system_hierarchy) > 0
         )
 
-        if len(self.var_categories_list) == 1 and self.ext_basis == "harmonic":
+        if len(self.var_categories_list) == 1:
             self.type_of_matrices = "dense"
         else:
             self.type_of_matrices = "sparse"
@@ -2735,7 +2736,10 @@ class Circuit(Subsystem):
         self._init_params = []
         self._out_of_sync = False  # for use with CentralDispatch
         self._make_property(
-            "_user_changed_parameter", False, "update_user_changed_parameter"
+            "_user_changed_parameter",
+            False,
+            "update_user_changed_parameter",
+            use_central_dispatch=False,
         )
 
         if initiate_sym_calc:
@@ -2829,7 +2833,10 @@ class Circuit(Subsystem):
         self._init_params = []
         self._out_of_sync = False  # for use with CentralDispatch
         self._make_property(
-            "_user_changed_parameter", False, "update_user_changed_parameter"
+            "_user_changed_parameter",
+            False,
+            "update_user_changed_parameter",
+            use_central_dispatch=False,
         )
 
         if initiate_sym_calc:
@@ -2928,96 +2935,6 @@ class Circuit(Subsystem):
             esys_method=esys_method,
             esys_method_options=esys_method_options,
         )
-
-    def dict_for_serialization(self):
-        # setting the __init__params attribute
-        modified_attrib_keys = (
-            [param.name for param in self.symbolic_params]
-            + [flux.name for flux in self.external_fluxes]
-            + [offset_charge.name for offset_charge in self.offset_charges]
-            + self.cutoff_names
-            + ["system_hierarchy", "subsystem_trunc_dims", "transformation_matrix"]
-        )
-        modified_attrib_dict = {key: getattr(self, key) for key in modified_attrib_keys}
-        init_params_dict = {}
-        init_params_list = ["ext_basis", "input_string", "truncated_dim"]
-
-        for param in init_params_list:
-            init_params_dict[param] = getattr(self, param)
-        init_params_dict["from_file"] = False
-        init_params_dict["basis_completion"] = self.symbolic_circuit.basis_completion
-
-        # storing which branches are used for closure_branches
-        closure_branches_data = []
-        for branch in self.closure_branches:  # store symbolic param as string
-            branch_params = branch.parameters.copy()
-            for param in branch_params:
-                if isinstance(branch_params[param], sm.Symbol):
-                    branch_params[param] = branch_params[param].name
-            branch_data = [
-                branch.nodes[0].index,
-                branch.nodes[1].index,
-                branch.type,
-                branch_params,
-            ]
-            closure_branches_data.append(branch_data)
-        modified_attrib_dict["closure_branches_data"] = closure_branches_data
-
-        init_params_dict["_modified_attributes"] = modified_attrib_dict
-        return init_params_dict
-
-    def serialize(self):
-        iodata = dict_serialize(self.dict_for_serialization())
-        iodata.typename = type(self).__name__
-        return iodata
-
-    @classmethod
-    def deserialize(cls, iodata: "IOData") -> "Circuit":
-        """
-        Take the given IOData and return an instance of the described class, initialized
-        with the data stored in io_data.
-
-        Parameters
-        ----------
-        iodata:
-
-        Returns
-        -------
-            Circuit instance
-        """
-        init_params = iodata.as_kwargs()
-        _modified_attributes = init_params.pop("_modified_attributes")
-
-        circuit = cls(**init_params)
-
-        closure_branches = [
-            circuit._find_branch(*branch_data)
-            for branch_data in _modified_attributes["closure_branches_data"]
-        ]
-        del _modified_attributes["closure_branches_data"]
-
-        # removing parameters that are not defined
-        configure_attribs = [
-            # "transformation_matrix",
-            "system_hierarchy",
-            "subsystem_trunc_dims",
-        ]
-        configure_attribs = [
-            attrib for attrib in configure_attribs if attrib in _modified_attributes
-        ]
-
-        circuit.configure(
-            closure_branches=closure_branches,
-            **{key: _modified_attributes[key] for key in configure_attribs},
-        )
-        # modifying the attributes if necessary
-        for attrib in _modified_attributes:
-            if attrib not in configure_attribs:
-                setattr(circuit, "_" + attrib, _modified_attributes[attrib])
-        if circuit.hierarchical_diagonalization:
-            circuit.generate_subsystems()
-            circuit.update_interactions()
-        return circuit
 
     def _find_branch(
         self, node_id_1: int, node_id_2: int, branch_type: str, branch_params: dict
@@ -3258,10 +3175,7 @@ class Circuit(Subsystem):
                 )
 
         # changing the matrix type if necessary
-        if (
-            len(flatten_list(self.var_categories.values())) == 1
-            and self.ext_basis == "harmonic"
-        ):
+        if len(flatten_list(self.var_categories.values())) == 1:
             self.type_of_matrices = "dense"
 
         self._set_vars()  # setting the attribute vars to store operator symbols
@@ -3422,7 +3336,6 @@ class Circuit(Subsystem):
         if (
             len((self.var_categories["extended"] + self.var_categories["periodic"]))
             == 1
-            and self.ext_basis == "harmonic"
         ):
             self.type_of_matrices = "dense"
 

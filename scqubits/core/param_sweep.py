@@ -1137,10 +1137,7 @@ class ParameterSweep(  # type:ignore
         return (
             NamedSlotsNdarray(bare_evals, {"subsys": np.arange(self.subsystem_count)}),
             NamedSlotsNdarray(bare_evecs, {"subsys": np.arange(self.subsystem_count)}),
-            {
-                subsys_index: circuit_esys[subsys_index]
-                for subsys_index in np.arange(self.subsystem_count)
-            },
+            circuit_esys,
         )
 
     def _update_subsys_compute_esys(
@@ -1251,7 +1248,7 @@ class ParameterSweep(  # type:ignore
             ]
             for subsys_index, _ in enumerate(self.hilbertspace)
         }
-        # update the lookuptables for subsystems when they use HD
+        # update the lookuptables for subsystems using hierarchical diagonalization
         for subsys_index, subsys in enumerate(hilbertspace.subsystem_list):
             if (
                 hasattr(subsys, "hierarchical_diagonalization")
@@ -1260,10 +1257,10 @@ class ParameterSweep(  # type:ignore
                 subsys.set_bare_eigensys(
                     self._data["circuit_esys"][subsys_index][paramindex_tuple]
                 )
-        if hasattr(hilbertspace.subsystem_list[0], "parent"):
-            hilbertspace.subsystem_list[0].parent._set_sync_status_to_True(
-                reset_affected_subsystem_indices=True
-            )
+        if hasattr(
+            hilbertspace.subsystem_list[0], "parent"
+        ):  # update necessary interactions and attributes
+            hilbertspace.subsystem_list[0].parent.update(calculate_bare_esys=False)
 
         evals, evecs = hilbertspace.eigensys(
             evals_count=evals_count, bare_esys=bare_esys  # type:ignore

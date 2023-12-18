@@ -69,8 +69,9 @@ def parse_branch_parameters(
     """
     branch_var_dict: Dict[Symbol, float] = {}
     branch_params: List[float] = []
+    aux_params: Dict[Symbol, float] = {}
     num_params = _junction_order(branch_type) + 1 if "JJ" in branch_type else 1
-    for word in words[0:num_params]:
+    for idx, word in enumerate(words):
         if not is_string_float(word):
             if len(word.split("=")) > 2:
                 raise Exception("Syntax error in branch specification.")
@@ -81,14 +82,19 @@ def parse_branch_parameters(
                 params = [process_word(word)]
         else:
             params = [float(word)]
-
-        if len(params) == 1:
-            branch_params.append(params[0])
+        if idx < num_params:
+            if len(params) == 1:
+                branch_params.append(params[0])
+            else:
+                branch_var_dict[params[0]] = params[1]
+                branch_params.append(params[0])
         else:
-            branch_var_dict[params[0]] = params[1]
-            branch_params.append(params[0])
-
-    return branch_params, branch_var_dict
+            if len(params) == 1:
+                raise Exception("Unknown auxiliary parameter given in input.")
+            else:
+                var_str, init_val = word.split("=")
+                aux_params[var_str] = init_val
+    return branch_params, branch_var_dict, aux_params
 
 
 class Node:
@@ -165,10 +171,12 @@ class Branch:
     branch_type:
         is the type of this Branch, example "C","JJ" or "L"
     parameters:
-        dictionary of parameters for the branch, namely for
+        list of parameters for the branch, namely for
         capacitance: {"EC":  <value>};
         for inductance: {"EL": <value>};
         for Josephson Junction: {"EJ": <value>, "ECJ": <value>}
+    aux_params:
+        Dictionary of auxiliary parameters which map a symbol from the input file a numeric parameter.
 
     Examples
     --------
@@ -183,6 +191,7 @@ class Branch:
         branch_type: str,
         parameters: Optional[List[Union[float, Symbol, int]]] = None,
         id_str: str = None,
+        aux_params: Dict[Symbol, float] = {},
     ):
         self.nodes = (n_i, n_f)
         self.type = branch_type
@@ -192,7 +201,7 @@ class Branch:
         # setting the parameters if it is provided
         if parameters is not None:
             self.set_parameters(parameters)
-
+        self.aux_params = aux_params
         self.nodes[0].branches.append(self)
         self.nodes[1].branches.append(self)
 
@@ -500,14 +509,14 @@ class SymbolicCircuit(serializers.Serializable):
         # setting the branch parameter variables
 
         # calculating the Hamiltonian directly when the number of nodes is less than 3
-        substitue_params = False
+        substitute_params = False
         if (
             len(self.nodes) >= settings.SYM_INVERSION_MAX_NODES
             or len(self.var_categories["frozen"]) > 0
         ):  # only calculate the symbolic hamiltonian when the number of nodes is less
             # than 3. Else, the calculation will be skipped to the end when numerical
             # Hamiltonian of the circuit is requested.
-            substitue_params = True
+            substitute_params = True
 
         # Calculate the Lagrangian
         (
@@ -515,7 +524,7 @@ class SymbolicCircuit(serializers.Serializable):
             self.potential_symbolic,
             self.lagrangian_node_vars,
             self.potential_node_vars,
-        ) = self.generate_symbolic_lagrangian(substitute_params=substitue_params)
+        ) = self.generate_symbolic_lagrangian(substitute_params=substitute_params)
 
         # replacing energies with capacitances in the kinetic energy of the Lagrangian
         (
@@ -524,7 +533,7 @@ class SymbolicCircuit(serializers.Serializable):
         ) = self._replace_energies_with_capacitances_L()
 
         self.hamiltonian_symbolic = self.generate_symbolic_hamiltonian(
-            substitute_params=substitue_params
+            substitute_params=substitute_params
         )
 
     def _replace_energies_with_capacitances_L(self):
@@ -612,26 +621,9 @@ class SymbolicCircuit(serializers.Serializable):
             branch_type = branch_list_input[0]
             node_id1, node_id2 = branch_list_input[1], branch_list_input[2]
 
-            if "JJ" in branch_type:
-                num_junc_params = _junction_order(branch_type) + 4
-
-            if ("JJ" in branch_type) and len(branch_list_input) != num_junc_params:
-                raise Exception(
-                    "Incorrect number of parameters: specification of JJ input in "
-                    f"line: {branch_list_input}"
-                )
-            elif (branch_type == "L" or branch_type == "C") and len(
-                branch_list_input
-            ) != 4:
-                raise Exception(
-                    "Incorrect number of parameters: specification of C or L "
-                    f"in line: {branch_list_input}"
-                )
-
-            branch_params, var_dict = parse_branch_parameters(
+            branch_params, var_dict, aux_params = parse_branch_parameters(
                 branch_list_input[3:], branch_type
             )
-
             for var in var_dict:
                 if var in branch_var_dict:
                     raise Exception(str(var) + " has already been initialized.")
@@ -652,6 +644,7 @@ class SymbolicCircuit(serializers.Serializable):
                         branch_type,
                         parameters,
                         id_str=str(len(branches)),
+                        aux_params=aux_params,
                     )
                 )
             elif node_id2 == 0:
@@ -662,6 +655,7 @@ class SymbolicCircuit(serializers.Serializable):
                         branch_type,
                         parameters,
                         id_str=str(len(branches)),
+                        aux_params=aux_params,
                     )
                 )
             else:
@@ -672,6 +666,7 @@ class SymbolicCircuit(serializers.Serializable):
                         branch_type,
                         parameters,
                         id_str=str(len(branches)),
+                        aux_params=aux_params,
                     )
                 )
         return branches, branch_var_dict
@@ -1192,7 +1187,9 @@ class SymbolicCircuit(serializers.Serializable):
             "frozen": [
                 i + 1 for i in range(len(pos_list)) if pos_list[i] in pos_frozen
             ],
-            "sigma": [i + 1 for i in range(len(pos_list)) if pos_list[i] == pos_Σ[0]] if not self.is_grounded else [],
+            "sigma": [i + 1 for i in range(len(pos_list)) if pos_list[i] == pos_Σ[0]]
+            if not self.is_grounded
+            else [],
         }
 
         return np.array(new_basis), var_categories
@@ -1537,7 +1534,7 @@ class SymbolicCircuit(serializers.Serializable):
                     ** 2
                 )
         # substitute params if necessary
-        if substitute_params:
+        if substitute_params and terms != 0:
             for symbol in self.symbolic_params:
                 terms = terms.subs(symbol.name, self.symbolic_params[symbol])
         return terms
@@ -1567,9 +1564,7 @@ class SymbolicCircuit(serializers.Serializable):
 
         # Make a copy of self; do not need symbolic expressions etc., so do a minimal
         # initialization only
-        circ_copy = SymbolicCircuit.from_yaml(
-            self.input_string, from_file=False, initiate_sym_calc=False
-        )
+        circ_copy = copy.deepcopy(self)
 
         # **************** removing all the capacitive branches and updating the nodes *
         # identifying capacitive branches
@@ -1902,6 +1897,94 @@ class SymbolicCircuit(serializers.Serializable):
         for p in self.var_categories["periodic"]:
             self.offset_charges = self.offset_charges + [symbols(f"ng{p}")]
 
+    def _branch_sym_expr(
+        self,
+        branch: Branch,
+        return_charge: bool = False,
+        substitute_params: bool = True,
+    ):
+        """
+        Returns the voltage across the branch in terms of the charge operators
+
+        Args:
+            branch (Branch): A branch of the instance
+        """
+        transformation_matrix = self.transformation_matrix
+
+        if return_charge:
+            frozen_indices = [
+                i - 1
+                for i in self.var_categories["frozen"] + self.var_categories["sigma"]
+            ]
+            # generating the C_mat_θ by inverting the capacitance matrix
+            if self.is_any_branch_parameter_symbolic() and not substitute_params:
+                C_mat_θ = (
+                    transformation_matrix.T
+                    * self._capacitance_matrix()
+                    * transformation_matrix
+                )
+                relevant_indices = [
+                    i for i in range(C_mat_θ.shape[0]) if i not in frozen_indices
+                ]
+                C_mat_θ = C_mat_θ[relevant_indices, relevant_indices]
+                C_mat_θ = C_mat_θ.inv()
+            else:
+                C_mat_θ = (
+                    transformation_matrix.T
+                    @ self._capacitance_matrix(substitute_params=substitute_params)
+                    @ transformation_matrix
+                )
+                C_mat_θ = np.delete(C_mat_θ, frozen_indices, 0)
+                C_mat_θ = np.delete(C_mat_θ, frozen_indices, 1)
+                C_mat_θ = np.linalg.inv(C_mat_θ)
+            p_θ_vars = [
+                symbols(f"Q{i}")
+                for i in self.var_categories["periodic"]
+                + self.var_categories["extended"]
+                + self.var_categories["free"]
+                # replacing the free charge with 0, as it would not affect the circuit
+                # Lagrangian.
+            ]
+            node_id1, node_id2 = [
+                node.index - (1 if not self.is_grounded else 0) for node in branch.nodes
+            ]
+            voltages = C_mat_θ * sympy.Matrix(p_θ_vars)
+
+            if not self.is_grounded:
+                voltages = list(voltages) + [0]
+
+            node_voltages = list(
+                np.linalg.inv(self.transformation_matrix) * sympy.Matrix(voltages)
+            )
+            if self.is_grounded:
+                node_voltages = [0] + node_voltages
+
+            branch_voltage_expr = node_voltages[node_id1] - node_voltages[node_id2]
+            # adding the offset charge variables
+            for var_index in self.var_categories["periodic"]:
+                branch_voltage_expr = branch_voltage_expr.subs(
+                    symbols(f"Q{var_index}"),
+                    symbols(f"n{var_index}") + symbols(f"ng{var_index}"),
+                )
+            return branch_voltage_expr * (
+                1 / (8 * branch.parameters["EC"])
+                if branch.type == "C"
+                else 1 / (8 * branch.parameters["ECJ"])
+            )
+
+        node_id1, node_id2 = [node.index for node in branch.nodes]
+        expr_node_vars = symbols(f"φ{node_id1}") - symbols(f"φ{node_id2}")
+        expr_node_vars = expr_node_vars.subs(
+            "φ0", 0
+        )  # substituting node flux of ground to zero
+        num_vars = len(self._node_list_without_ground)
+        new_vars = [symbols(f"θ{index}") for index in range(1, 1 + num_vars)]
+        old_vars = [symbols(f"φ{index}") for index in range(1, 1 + num_vars)]
+        transformed_expr = transformation_matrix.dot(new_vars)
+        for idx, var in enumerate(old_vars):
+            expr_node_vars = expr_node_vars.subs(var, transformed_expr[idx])
+        return expr_node_vars
+
     def generate_symbolic_lagrangian(
         self, substitute_params: bool = False
     ) -> Tuple[sympy.Expr, sympy.Expr, sympy.Expr, sympy.Expr]:
@@ -1955,7 +2038,7 @@ class SymbolicCircuit(serializers.Serializable):
 
         potential_φ = inductor_terms_φ + JJ_terms_φ
         potential_θ = (
-            potential_φ.copy()
+            potential_φ.copy() if potential_φ != 0 else symbols("x") * 0
         )  # copying the potential in terms of the old variables to make substitutions
 
         for index in range(

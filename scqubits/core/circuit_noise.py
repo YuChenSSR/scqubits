@@ -16,10 +16,13 @@ import functools
 from numpy import ndarray
 import numpy as np
 import qutip as qt
+import scipy as sp
 import copy
 
-from scqubits.core.noise import NOISE_PARAMS, NoisySystem
-from scqubits.core.circuit_utils import get_trailing_number
+from scqubits.core.noise import NOISE_PARAMS, NoisySystem, calc_therm_ratio
+from scqubits.core.circuit_utils import get_trailing_number, keep_terms_for_subsystem
+from scqubits.utils.misc import is_string_float
+import scqubits.core.units as units
 
 from types import MethodType
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -52,6 +55,104 @@ class NoisyCircuit(NoisySystem, ABC):
                 )
         return sum(eval_matrix_list)
 
+    @staticmethod
+    def Q_from_branch(branch):
+        if sum(["Q_" in key for key in branch.aux_params]):
+            key = "Q_" + ("ind" if branch.type == "L" else "cap")
+            Q_str = branch.aux_params[key]
+            if not is_string_float(Q_str):
+
+                def Q_func(omega, T):
+                    return eval(Q_str)
+
+            else:
+                if branch.type != "L":
+
+                    def Q_func(omega, T):
+                        return eval(
+                            f"({float(Q_str)} * (2 * np.pi * 6e9 / np.abs(units.to_standard_units(omega))) ** 0.7)"
+                        )
+
+                else:
+
+                    def Q_func(omega, T):
+                        therm_ratio = abs(calc_therm_ratio(omega, T))
+                        therm_ratio_500MHz = calc_therm_ratio(
+                            2 * np.pi * float(Q_str), T, omega_in_standard_units=True
+                        )
+                        return (
+                            float(Q_str)
+                            * (
+                                sp.special.kv(0, 1 / 2 * therm_ratio_500MHz)
+                                * np.sinh(1 / 2 * therm_ratio_500MHz)
+                            )
+                            / (
+                                sp.special.kv(0, 1 / 2 * therm_ratio)
+                                * np.sinh(1 / 2 * therm_ratio)
+                            )
+                        )
+
+            return Q_func
+        return None
+
+    def generate_methods_d_hamiltonian_d(self):
+        """
+        Generate methods which return the derivative of the Hamiltonian with respect to
+        offset charges, external fluxes and junction energies.
+        """
+
+        ext_flux_1_over_f_methods = {}
+        ng_1_over_f_methods = {}
+        cc_1_over_f_methods = {}
+
+        for param_sym in self.external_fluxes + self.offset_charges:
+
+            def param_derivative(self, param_sym=param_sym):
+                parent_instance = self.return_parent_circuit()
+                hamiltonian = parent_instance.fetch_symbolic_hamiltonian()
+                hamiltonian = parent_instance._hamiltonian_sym_for_numerics
+                hamiltonian = hamiltonian.subs("I", 1)
+                all_sym_parameters = (
+                    list(parent_instance.symbolic_params.keys())
+                    + parent_instance.external_fluxes
+                    + parent_instance.offset_charges
+                )
+                diff_sym_expr = hamiltonian.diff(param_sym)
+                # substitute all symbolic params
+                for param in all_sym_parameters:
+                    diff_sym_expr = diff_sym_expr.subs(
+                        param, getattr(parent_instance, param.name)
+                    )
+                # evaluate the expression
+                return parent_instance._evaluate_symbolic_expr(diff_sym_expr)
+
+            if param_sym in self.external_fluxes:
+                ext_flux_1_over_f_methods[
+                    f"d_hamiltonian_d_flux{get_trailing_number(param_sym.name)}"
+                ] = param_derivative
+            elif param_sym in self.offset_charges:
+                ng_1_over_f_methods[
+                    f"d_hamiltonian_d_ng{get_trailing_number(param_sym.name)}"
+                ] = param_derivative
+        ## cc noise methods
+        junction_branches = [branch for branch in self.branches if "JJ" in branch.type]
+        for idx, branch in enumerate(junction_branches):
+
+            def param_derivative(self, branch=branch):
+                return -self.junction_related_evaluation(branch, calc="dhdEJ")
+
+            cc_1_over_f_methods[f"d_hamiltonian_d_EJ{branch.id_str}"] = param_derivative
+        noise_helper_methods = {
+            **ext_flux_1_over_f_methods,
+            **ng_1_over_f_methods,
+            **cc_1_over_f_methods,
+        }
+        self.noise_helper_methods = noise_helper_methods
+        for method_name in noise_helper_methods:
+            setattr(
+                self, method_name, MethodType(noise_helper_methods[method_name], self)
+            )
+
     def _transform_expr_to_new_variables(
         self, expr_node_vars: sm.Expr, substitute_symbol: Optional[str] = None
     ):
@@ -72,71 +173,15 @@ class NoisyCircuit(NoisySystem, ABC):
                 )
         return expr_node_vars
 
-    def generate_methods_d_hamiltonian_d(self):
-        """
-        Generate methods which return the derivative of the Hamiltonian with respect to
-        offset charges, external fluxes and junction energies.
-        """
-
-        ext_flux_1_over_f_methods = {}
-        ng_1_over_f_methods = {}
-        cc_1_over_f_methods = {}
-
-        for param_sym in self.external_fluxes + self.offset_charges:
-
-            def param_derivative(self=self, param_sym=param_sym):
-                hamiltonian, _ = self.generate_hamiltonian_sym_for_numerics(
-                    hamiltonian=self.hamiltonian_symbolic,
-                    shift_potential_to_origin=False,
-                    return_exprs=True,
-                )
-                hamiltonian = hamiltonian.subs("I", 1)
-                all_sym_parameters = (
-                    list(self.symbolic_params.keys())
-                    + self.external_fluxes
-                    + self.offset_charges
-                )
-                diff_sym_expr = hamiltonian.diff(param_sym)
-                # substitute all symbolic params
-                for param in all_sym_parameters:
-                    diff_sym_expr = diff_sym_expr.subs(param, getattr(self, param.name))
-                # evaluate the expression
-                return self._evaluate_symbolic_expr(diff_sym_expr)
-
-            if param_sym in self.external_fluxes:
-                ext_flux_1_over_f_methods[
-                    f"d_hamiltonian_d_flux{get_trailing_number(param_sym.name)}"
-                ] = param_derivative
-            elif param_sym in self.offset_charges:
-                ng_1_over_f_methods[
-                    f"d_hamiltonian_d_ng{get_trailing_number(param_sym.name)}"
-                ] = param_derivative
-        ## cc noise methods
-        junction_branches = [branch for branch in self.branches if "JJ" in branch.type]
-        for idx, branch in enumerate(junction_branches):
-
-            def param_derivative(self=self, branch=branch):
-                return -self.junction_related_evaluation(branch, calc="dhdEJ")
-
-            cc_1_over_f_methods[f"d_hamiltonian_d_EJ{branch.id_str}"] = param_derivative
-        noise_helper_methods = {
-            **ext_flux_1_over_f_methods,
-            **ng_1_over_f_methods,
-            **cc_1_over_f_methods,
-        }
-        for method_name in noise_helper_methods:
-            setattr(
-                self, method_name, MethodType(noise_helper_methods[method_name], self)
-            )
-
     def junction_related_evaluation(self, branch_junction: Branch, calc="dhdEJ"):
-        hamiltonian, _ = self.generate_hamiltonian_sym_for_numerics(
-            hamiltonian=self.hamiltonian_symbolic,
-            shift_potential_to_origin=False,
-            return_exprs=True,
-        )
-        for sym in self.offset_charges + list(self.symbolic_params.keys()):
-            hamiltonian = hamiltonian.subs(sym, getattr(self, sym.name))
+        parent_instance = self.return_parent_circuit()
+        hamiltonian = parent_instance.fetch_symbolic_hamiltonian()
+        hamiltonian = parent_instance._hamiltonian_sym_for_numerics
+
+        for sym in parent_instance.offset_charges + list(
+            parent_instance.symbolic_params.keys()
+        ):
+            hamiltonian = hamiltonian.subs(sym, getattr(parent_instance, sym.name))
         hamiltonian = hamiltonian.subs("I", 1)
         branch_cos_node_expr = sm.cos(
             sm.symbols(f"φ{branch_junction.nodes[0].index}")
@@ -145,21 +190,25 @@ class NoisyCircuit(NoisySystem, ABC):
         branch_cos_node_expr = branch_cos_node_expr.subs(
             "φ0", 0
         )  # setting ground node to zero.
-        branch_cos_expr = self._transform_expr_to_new_variables(branch_cos_node_expr)
+        branch_cos_expr = parent_instance._transform_expr_to_new_variables(
+            branch_cos_node_expr
+        )
         expr_dict = hamiltonian.as_coefficients_dict()
         for term, coefficient in expr_dict.items():
             term_without_ext_flux = copy.copy(term)
-            for flux in self.external_fluxes:
+            for flux in parent_instance.external_fluxes:
                 term_without_ext_flux = term_without_ext_flux.subs(flux, 0)
             if term_without_ext_flux == branch_cos_expr:
                 break
         # substitute external flux
-        for flux in self.external_fluxes:
-            term = term.subs(flux, getattr(self, flux.name))
+        for flux in parent_instance.external_fluxes:
+            term = term.subs(flux, getattr(parent_instance, flux.name))
         if calc == "sin_phi_qp":
             term = term.subs(sm.cos, sm.sin)
             term = term.subs(term.args[0], term.args[0] / 2)
-        return self._evaluate_symbolic_expr(term)
+
+        # evaluate the expression
+        return parent_instance._evaluate_symbolic_expr(term)
 
     def generate_tphi_1_over_f_methods(self):
         """Generate methods tphi_1_over_f_{noise_type}{index} methods for
@@ -442,7 +491,7 @@ class NoisyCircuit(NoisySystem, ABC):
 
     def wrapper_t1_charge_impedance(self, branch: Branch):
         def t1_charge_impedance(
-            self=self,
+            self,
             i: int = 1,
             j: int = 0,
             Z: Union[float, Callable] = NOISE_PARAMS["R_0"],
@@ -452,28 +501,10 @@ class NoisyCircuit(NoisySystem, ABC):
             get_rate: bool = False,
             branch=branch,
         ) -> float:
-            if branch.type == "L":
-                var_str = "θ"
-            else:
-                var_str = "Q"
-
-            branch_var_expr_node = sm.symbols(f"φ{branch.nodes[0].index}") - sm.symbols(
-                f"φ{branch.nodes[1].index}"
+            parent_circuit = self.return_parent_circuit()
+            branch_var_expr = parent_circuit.symbolic_circuit._branch_sym_expr(
+                branch, return_charge=False if branch.type == "L" else True
             )
-            branch_var_expr_node = branch_var_expr_node.subs(
-                "φ0", 0
-            )  # substituting node flux of ground to zero
-            branch_var_expr = self._transform_expr_to_new_variables(
-                branch_var_expr_node, substitute_symbol=var_str
-            )
-            # changing charge variables if necessary
-            if var_str == "Q":
-                for var_sym in branch_var_expr.free_symbols:
-                    var_index = get_trailing_number(var_sym.name)
-                    if var_index in self.var_categories["periodic"]:
-                        branch_var_expr = branch_var_expr.subs(
-                            var_sym, sm.symbols(f"n{var_index}")
-                        )
 
             if branch.type != "L":
                 branch_param = (
@@ -484,7 +515,7 @@ class NoisyCircuit(NoisySystem, ABC):
             else:
                 branch_param = branch.parameters["EL"]
             if isinstance(branch_param, sm.Expr):
-                branch_param = getattr(self, branch_param.name)
+                branch_param = getattr(parent_circuit, branch_param.name)
 
             return NoisySystem.t1_charge_impedance(
                 self=self,
@@ -495,7 +526,7 @@ class NoisyCircuit(NoisySystem, ABC):
                 total=total,
                 esys=esys,
                 get_rate=get_rate,
-                noise_op=self._evaluate_symbolic_expr(branch_var_expr),
+                noise_op=parent_circuit._evaluate_symbolic_expr(branch_var_expr),
             )
 
         return t1_charge_impedance
@@ -507,7 +538,7 @@ class NoisyCircuit(NoisySystem, ABC):
         if branch.type != "L":
 
             def t1_method(
-                self=self,
+                self,
                 i: int = 1,
                 j: int = 0,
                 Q_cap: Union[float, Callable] = None,
@@ -517,22 +548,10 @@ class NoisyCircuit(NoisySystem, ABC):
                 get_rate: bool = False,
                 branch: Branch = branch,
             ) -> float:
-                branch_var_expr_node = sm.symbols(
-                    f"φ{branch.nodes[0].index}"
-                ) - sm.symbols(f"φ{branch.nodes[1].index}")
-                branch_var_expr_node = branch_var_expr_node.subs(
-                    "φ0", 0
-                )  # substituting node flux of ground to zero
-                branch_var_expr = self._transform_expr_to_new_variables(
-                    branch_var_expr_node, substitute_symbol="Q"
+                parent_circuit = self.return_parent_circuit()
+                branch_charge_expr = parent_circuit.symbolic_circuit._branch_sym_expr(
+                    branch, return_charge=True
                 )
-                # changing charge variables if necessary
-                for var_sym in branch_var_expr.free_symbols:
-                    var_index = get_trailing_number(var_sym.name)
-                    if var_index in self.var_categories["periodic"]:
-                        branch_var_expr = branch_var_expr.subs(
-                            var_sym, sm.symbols(f"n{var_index}")
-                        )
 
                 branch_param = (
                     branch.parameters["EC"]
@@ -540,25 +559,25 @@ class NoisyCircuit(NoisySystem, ABC):
                     else branch.parameters["ECJ"]
                 )
                 if isinstance(branch_param, sm.Expr):
-                    branch_param = getattr(self, branch_param.name)
+                    branch_param = getattr(parent_circuit, branch_param.name)
 
                 return NoisySystem.t1_capacitive(
                     self=self,
                     i=i,
                     j=j,
-                    Q_cap=Q_cap,
+                    Q_cap=self.Q_from_branch(branch),
                     T=T,
                     total=total,
                     esys=esys,
                     get_rate=get_rate,
-                    noise_op=self._evaluate_symbolic_expr(branch_var_expr),
+                    noise_op=parent_circuit._evaluate_symbolic_expr(branch_charge_expr),
                     branch_params=branch_param,
                 )
 
         else:
 
             def t1_method(
-                self=self,
+                self,
                 i: int = 1,
                 j: int = 0,
                 Q_ind: Union[float, Callable] = None,
@@ -568,29 +587,26 @@ class NoisyCircuit(NoisySystem, ABC):
                 get_rate: bool = False,
                 branch: Branch = branch,
             ) -> float:
-                branch_var_expr_node = sm.symbols(
-                    f"φ{branch.nodes[0].index}"
-                ) - sm.symbols(f"φ{branch.nodes[1].index}")
-                branch_var_expr_node = branch_var_expr_node.subs(
-                    "φ0", 0
-                )  # substituting node flux of ground to zero
-                branch_var_expr = self._transform_expr_to_new_variables(
-                    branch_var_expr_node, substitute_symbol="θ"
+                parent_circuit = self.return_parent_circuit()
+                branch_var_expr = parent_circuit.symbolic_circuit._branch_sym_expr(
+                    branch
                 )
+
                 branch_param = branch.parameters["EL"]
+
                 if isinstance(branch_param, sm.Expr):
-                    branch_param = getattr(self, branch_param.name)
+                    branch_param = getattr(parent_circuit, branch_param.name)
 
                 return NoisySystem.t1_inductive(
                     self=self,
                     i=i,
                     j=j,
-                    Q_ind=Q_ind,
+                    Q_ind=self.Q_from_branch(branch),
                     T=T,
                     total=total,
                     esys=esys,
                     get_rate=get_rate,
-                    noise_op=self._evaluate_symbolic_expr(branch_var_expr),
+                    noise_op=parent_circuit._evaluate_symbolic_expr(branch_var_expr),
                     branch_params=branch_param,
                 )
 
@@ -639,7 +655,7 @@ class NoisyCircuit(NoisySystem, ABC):
 
     def generate_overall_t1_inductive(self):
         def t1_method(
-            self=self,
+            self,
             i: int = 1,
             j: int = 0,
             Q_ind: Union[float, Callable] = None,
@@ -649,12 +665,13 @@ class NoisyCircuit(NoisySystem, ABC):
             get_rate: bool = False,
         ) -> float:
             t1_times = []
-            for branch in [b for b in self.branches if b.type == "L"]:
+            parent_circuit = self.return_parent_circuit()
+            for branch in [b for b in parent_circuit.branches if b.type == "L"]:
                 t1_times.append(
-                    getattr(self, f"t1_inductive{branch.id_str}")(
+                    getattr(parent_circuit, f"t1_inductive{branch.id_str}")(
                         i=i,
                         j=j,
-                        Q_ind=Q_ind,
+                        Q_ind=self.Q_from_branch(branch),
                         T=T,
                         total=total,
                         esys=esys,
@@ -669,7 +686,7 @@ class NoisyCircuit(NoisySystem, ABC):
 
     def generate_overall_t1_capacitive(self):
         def t1_method(
-            self=self,
+            self,
             i: int = 1,
             j: int = 0,
             Q_cap: Union[float, Callable] = None,
@@ -679,12 +696,13 @@ class NoisyCircuit(NoisySystem, ABC):
             get_rate: bool = False,
         ) -> float:
             t1_times = []
-            for branch in [b for b in self.branches if b.type != "L"]:
+            parent_circuit = self.return_parent_circuit()
+            for branch in [b for b in parent_circuit.branches if b.type != "L"]:
                 t1_times.append(
-                    getattr(self, f"t1_capacitive{branch.id_str}")(
+                    getattr(parent_circuit, f"t1_capacitive{branch.id_str}")(
                         i=i,
                         j=j,
-                        Q_cap=Q_cap,
+                        Q_cap=self.Q_from_branch(branch),
                         T=T,
                         total=total,
                         esys=esys,
@@ -709,9 +727,10 @@ class NoisyCircuit(NoisySystem, ABC):
             get_rate: bool = False,
         ) -> float:
             t1_times = []
-            for branch in [b for b in self.branches if b.type != "L"]:
+            parent_circuit = self.return_parent_circuit()
+            for branch in [b for b in parent_circuit.branches if b.type != "L"]:
                 t1_times.append(
-                    getattr(self, f"t1_charge_impedance{branch.id_str}")(
+                    getattr(parent_circuit, f"t1_charge_impedance{branch.id_str}")(
                         i=i,
                         j=j,
                         Z=Z,
