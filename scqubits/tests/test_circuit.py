@@ -144,16 +144,16 @@ class TestCircuit:
             subsystem_trunc_dims=subsystem_trunc_dims,
         )
 
-        DFC._Φ1 = 0.5 + 0.01768
-        DFC._Φ2 = -0.2662
-        DFC._Φ3 = -0.5 + 0.01768
+        DFC.Φ1 = 0.5 + 0.01768
+        DFC.Φ2 = -0.2662
+        DFC.Φ3 = -0.5 + 0.01768
 
-        DFC._cutoff_ext_1 = 110
-        DFC._cutoff_ext_2 = 110
-        DFC._cutoff_ext_3 = 110
-        DFC._cutoff_ext_4 = 110
+        DFC.cutoff_ext_1 = 110
+        DFC.cutoff_ext_2 = 110
+        DFC.cutoff_ext_3 = 110
+        DFC.cutoff_ext_4 = 110
+        DFC.update()
 
-        DFC.EJ = 4.6
         eigs = DFC.eigenvals()
         generated_eigs = eigs - eigs[0]
         assert np.allclose(generated_eigs, ref_eigs)
@@ -180,16 +180,16 @@ class TestCircuit:
             subsystem_trunc_dims=subsystem_trunc_dims,
         )
 
-        DFC._Φ1 = 0.5 + 0.01768
-        DFC._Φ2 = -0.2662
-        DFC._Φ3 = -0.5 + 0.01768
+        DFC.Φ1 = 0.5 + 0.01768
+        DFC.Φ2 = -0.2662
+        DFC.Φ3 = -0.5 + 0.01768
 
-        DFC._cutoff_ext_1 = 110
-        DFC._cutoff_ext_2 = 110
-        DFC._cutoff_ext_3 = 110
-        DFC._cutoff_ext_4 = 110
+        DFC.cutoff_ext_1 = 110
+        DFC.cutoff_ext_2 = 110
+        DFC.cutoff_ext_3 = 110
+        DFC.cutoff_ext_4 = 110
+        DFC.update()
 
-        DFC.EJ = 4.6
         eigs = DFC.eigenvals()
         generated_eigs = eigs - eigs[0]
         assert np.allclose(generated_eigs, ref_eigs)
@@ -210,6 +210,7 @@ class TestCircuit:
             lc_yaml, from_file=False, initiate_sym_calc=True, ext_basis="harmonic"
         )
         circ.EJ = 0.01
+        circ.update()
         eigs_ref = np.array(
             [
                 35.681948467838,
@@ -224,7 +225,7 @@ class TestCircuit:
         assert np.allclose(eigs_test, eigs_ref)
 
     @staticmethod
-    def test_param_sweep(num_cpus):
+    def test_get_spectrum_vs_paramvals(num_cpus):
         DFC = scq.Circuit(
             DATADIR + "circuit_DFC.yaml",
             ext_basis="discretized",
@@ -242,15 +243,32 @@ class TestCircuit:
             subsystem_trunc_dims=subsystem_trunc_dims,
         )
 
-        DFC._Φ1 = 0.5 + 0.01768
-        DFC._Φ2 = -0.2662
-        DFC._Φ3 = -0.5 + 0.01768
+        DFC.Φ1 = 0.5 + 0.01768
+        DFC.Φ2 = -0.2662
+        DFC.Φ3 = -0.5 + 0.01768
 
-        DFC._cutoff_ext_1 = 110
-        DFC._cutoff_ext_2 = 110
-        DFC._cutoff_ext_3 = 110
-        DFC._cutoff_ext_4 = 110
-
-        DFC.EJ = 4.6
-
+        DFC.cutoff_ext_1 = 110
+        DFC.cutoff_ext_2 = 110
+        DFC.cutoff_ext_3 = 110
+        DFC.cutoff_ext_4 = 110
+        DFC.update()
         DFC.get_spectrum_vs_paramvals("Φ1", np.linspace(0, 1, 11), num_cpus=num_cpus)
+
+        paramvals_by_name = {
+            "Φ1": np.linspace(0.4, 0.5, 6),
+            "Φ2": np.linspace(0.4, 0.5, 3),
+        }
+
+        # update Hilbert space function
+        def update_hilbertspace(Φ1, Φ2):
+            DFC.Φ1 = Φ1
+            DFC.Φ2 = Φ2
+            DFC.update()
+
+        ps = scq.ParameterSweep(
+            hilbertspace=DFC.hilbert_space,
+            paramvals_by_name=paramvals_by_name,
+            update_hilbertspace=update_hilbertspace,
+            evals_count=6,
+            num_cpus=num_cpus,
+        )
