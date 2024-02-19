@@ -127,11 +127,11 @@ class CircuitRoutines(ABC):
     def return_root_child(self, var_index: int):
         if (
             not self.hierarchical_diagonalization
-            and var_index in self.var_categories_list
+            and var_index in self.dynamic_var_indices
         ):
             return self
         for subsys in self.subsystems:
-            if var_index in subsys.var_categories_list:
+            if var_index in subsys.dynamic_var_indices:
                 return subsys.return_root_child(var_index)
 
     def return_parent_circuit(self):
@@ -294,7 +294,7 @@ class CircuitRoutines(ABC):
         """
         cutoffs_dict = {}
 
-        for var_index in self.var_categories_list:
+        for var_index in self.dynamic_var_indices:
             for cutoff_name in self.cutoff_names:
                 if str(var_index) in cutoff_name:
                     cutoffs_dict[var_index] = getattr(self, cutoff_name)
@@ -338,9 +338,11 @@ class CircuitRoutines(ABC):
                 if (branch.type == "C" or "JJ" in branch.type)
             ]
             capacitance_params = [
-                branch.parameters["EC"]
-                if branch.type == "C"
-                else branch.parameters["ECJ"]
+                (
+                    branch.parameters["EC"]
+                    if branch.type == "C"
+                    else branch.parameters["ECJ"]
+                )
                 for branch in capacitance_branches
             ]
             capacitance_sym_params = [
@@ -436,13 +438,6 @@ class CircuitRoutines(ABC):
             for subsys in self.subsystems:
                 setattr(subsys, param_name, value)
 
-    def _set_property_and_update_ext_basis(self, param_name: str, value: str) -> None:
-        """
-        Setter method for changing the attribute ext_basis.
-        """
-        setattr(self, f"_{param_name}", value)
-        self._configure()
-
     def _make_property(
         self,
         attrib_name: str,
@@ -499,16 +494,6 @@ class CircuitRoutines(ABC):
                 if old_dispatch_status:
                     settings.DISPATCH_ENABLED = True
 
-        elif property_update_type == "update_ext_basis":
-
-            def setter(obj, value, name=attrib_name):
-                old_dispatch_status = settings.DISPATCH_ENABLED
-                if old_dispatch_status:
-                    settings.DISPATCH_ENABLED = False
-                obj._set_property_and_update_ext_basis(name, value)
-                if old_dispatch_status:
-                    settings.DISPATCH_ENABLED = True
-
         elif property_update_type == "update_user_changed_parameter":
 
             def setter(obj, value, name=attrib_name):
@@ -533,8 +518,7 @@ class CircuitRoutines(ABC):
         self, var_indices: Tuple[int], phi_range: Tuple[float]
     ) -> None:
         """
-        Sets the flux range for discretized phi basis when ext_basis is set to
-        'discretized'.
+        Sets the flux range for discretized phi basis or for plotting
 
         Parameters
         ----------
@@ -545,23 +529,11 @@ class CircuitRoutines(ABC):
         """
         if self.hierarchical_diagonalization:
             for var_index in var_indices:
-                if self._basis_for_var_index(var_index) != "discretized":
-                    raise Exception(
-                        "The variable with var index: ",
-                        var_index,
-                        " is not set to discretized phi basis.",
-                    )
                 subsys_index = self.get_subsystem_index(var_index)
                 self.subsystems[subsys_index].set_discretized_phi_range(
                     (var_index,), phi_range
                 )
                 self._store_updated_subsystem_index(subsys_index)
-        elif self.ext_basis != "discretized":
-            raise Exception(
-                "The basis for variable indices: ",
-                var_indices,
-                " is not set to discretized phi basis.",
-            )
 
         for var_index in var_indices:
             if var_index not in self.var_categories["extended"]:
@@ -694,7 +666,7 @@ class CircuitRoutines(ABC):
             full_hamiltonian = self.parent.fetch_symbolic_hamiltonian()
             hamiltonian, _ = self._sym_hamiltonian_for_var_indices(
                 full_hamiltonian,
-                self.var_categories["periodic"] + self.var_categories["extended"],
+                self.dynamic_var_indices,
             )
             return hamiltonian
 
@@ -831,7 +803,7 @@ class CircuitRoutines(ABC):
                 while parent.is_child:
                     grandparent = parent.parent
                     # find the subsystem position of the parent system
-                    subsystem_position += f"of subsystem {grandparent.get_subsystem_index(parent.var_categories_list[0])} "
+                    subsystem_position += f"of subsystem {grandparent.get_subsystem_index(parent.dynamic_var_indices[0])} "
                     parent = grandparent
                 raise Exception(
                     f"The truncation index for {subsystem_position} exceeds the maximum"
@@ -883,7 +855,9 @@ class CircuitRoutines(ABC):
                 for var_sym in term.free_symbols
                 if var_sym not in non_operator_symbols
             ]
-            term_operator_indices_unique = list(set(term_operator_indices))
+            term_operator_indices_unique = unique_elements_in_list(
+                term_operator_indices
+            )
 
             if len(set(term_operator_indices_unique) - set(subsys_index_list)) == 0:
                 H_sys += term
@@ -932,7 +906,9 @@ class CircuitRoutines(ABC):
                     for var_sym in term.free_symbols
                     if var_sym not in non_operator_symbols
                 ]
-                term_operator_indices_unique = list(set(term_operator_indices))
+                term_operator_indices_unique = unique_elements_in_list(
+                    term_operator_indices
+                )
 
                 if len(set(term_operator_indices_unique) - set(subsys_index_list)) == 0:
                     H_sys += term
@@ -982,31 +958,48 @@ class CircuitRoutines(ABC):
                     ],
                 )
             )
-            self.subsystems: List["circuit.Subsystem"] = [
-                circuit.Subsystem(
-                    self,
-                    systems_sym[index],
-                    system_hierarchy=self.system_hierarchy[index],
-                    truncated_dim=self.subsystem_trunc_dims[index][0]
-                    if type(self.subsystem_trunc_dims[index]) == list
-                    else self.subsystem_trunc_dims[index],
-                    ext_basis=(
-                        "harmonic"
-                        if self._is_expression_purely_harmonic(systems_sym[index])
-                        else self.ext_basis
-                    )
-                    if not isinstance(self.ext_basis, list)
-                    else self.ext_basis[index],
-                    subsystem_trunc_dims=self.subsystem_trunc_dims[index][1]
-                    if type(self.subsystem_trunc_dims[index]) == list
-                    else None,
-                    evals_method=self.evals_method,
-                    evals_method_options=self.evals_method_options,
-                    esys_method=self.esys_method,
-                    esys_method_options=self.esys_method_options,
+            self.subsystems: List["circuit.Subsystem"] = []
+            for index in range(len(self.system_hierarchy)):
+                is_purely_harmonic = self._is_expression_purely_harmonic(
+                    systems_sym[index]
                 )
-                for index in range(len(self.system_hierarchy))
-            ]
+                ext_basis = (
+                    ("harmonic" if is_purely_harmonic else self.ext_basis)
+                    if not isinstance(self.ext_basis, list)
+                    else self.ext_basis[index]
+                )
+                self.subsystems.append(
+                    circuit.Subsystem(
+                        self,
+                        systems_sym[index],
+                        system_hierarchy=self.system_hierarchy[index],
+                        truncated_dim=(
+                            self.subsystem_trunc_dims[index][0]
+                            if type(self.subsystem_trunc_dims[index]) == list
+                            else self.subsystem_trunc_dims[index]
+                        ),
+                        ext_basis=ext_basis,
+                        subsystem_trunc_dims=(
+                            self.subsystem_trunc_dims[index][1]
+                            if type(self.subsystem_trunc_dims[index]) == list
+                            else None
+                        ),
+                        evals_method=(
+                            self.evals_method if not is_purely_harmonic else None
+                        ),
+                        evals_method_options=(
+                            self.evals_method_options
+                            if not is_purely_harmonic
+                            else None
+                        ),
+                        esys_method=(
+                            self.esys_method if not is_purely_harmonic else None
+                        ),
+                        esys_method_options=(
+                            self.esys_method_options if not is_purely_harmonic else None
+                        ),
+                    )
+                )
 
             self.hilbert_space = HilbertSpace(self.subsystems)
 
@@ -1358,7 +1351,7 @@ class CircuitRoutines(ABC):
         for term in self.hamiltonian_symbolic.as_ordered_terms():
             if is_potential_term(term):
                 potential_symbolic += term
-        for i in self.var_categories_list:
+        for i in self.dynamic_var_indices:
             potential_symbolic = (
                 potential_symbolic.replace(
                     sm.symbols(f"cosθ{i}"), sm.cos(1.0 * sm.symbols(f"θ{i}"))
@@ -1475,12 +1468,15 @@ class CircuitRoutines(ABC):
         -------
             Returns the operator which is identity wrapped for the current subsystem.
         """
-        var_index_list = (
-            self.var_categories["periodic"] + self.var_categories["extended"]
-        )
+        var_index_list = self.dynamic_var_indices.copy()
         var_index_pos = var_index_list.index(var_index)
 
-        cutoff_names = np.fromiter(self._collect_cutoff_values(), dtype=int)  # [
+        cutoffs_dict = self.cutoffs_dict()
+        for var_idx in cutoffs_dict:
+            if var_idx in self.var_categories["periodic"]:
+                cutoffs_dict[var_idx] = 2 * cutoffs_dict[var_idx] + 1
+
+        var_dim_list = [cutoffs_dict[var_idx] for var_idx in var_index_list]
 
         if self.type_of_matrices == "dense":
             matrix_format = "array"
@@ -1490,12 +1486,12 @@ class CircuitRoutines(ABC):
         if len(var_index_list) > 1:
             if var_index_pos > 0:
                 identity_left = sparse.identity(
-                    np.prod(cutoff_names[: var_index_list.index(var_index)]),
+                    np.prod(var_dim_list[:var_index_pos]),
                     format=matrix_format,
                 )
             if var_index_pos < len(var_index_list) - 1:
                 identity_right = sparse.identity(
-                    np.prod(cutoff_names[var_index_list.index(var_index) + 1 :]),
+                    np.prod(var_dim_list[var_index_pos + 1 :]),
                     format=matrix_format,
                 )
 
@@ -1704,7 +1700,6 @@ class CircuitRoutines(ABC):
                         bare_esys=bare_esys,
                     )
                 )
-
             cos_term_operator = coefficient * functools.reduce(
                 builtin_op.mul,
                 operator_list,
@@ -1755,9 +1750,9 @@ class CircuitRoutines(ABC):
             for var_type in extended_vars:
                 for sym_variable in extended_vars[var_type]:
                     op_name = sym_variable.name + "_operator"
-                    extended_operators[
-                        op_name
-                    ] = hierarchical_diagonalization_func_factory(sym_variable.name)
+                    extended_operators[op_name] = (
+                        hierarchical_diagonalization_func_factory(sym_variable.name)
+                    )
 
         elif self.ext_basis == "discretized":
             nonwrapped_ops = {
@@ -1814,9 +1809,9 @@ class CircuitRoutines(ABC):
                 var_index = get_operator_number(sym_variable.name)
                 op_name = sym_variable.name + "_operator"
                 if self.hierarchical_diagonalization:
-                    periodic_operators[
-                        op_name
-                    ] = hierarchical_diagonalization_func_factory(sym_variable.name)
+                    periodic_operators[op_name] = (
+                        hierarchical_diagonalization_func_factory(sym_variable.name)
+                    )
                 else:
                     periodic_operators[op_name] = operator_func_factory(
                         op_func, var_index
@@ -1874,7 +1869,7 @@ class CircuitRoutines(ABC):
         """
         Returns true if the instance is a subsystem of self (regardless of the hierarchy)
         """
-        if len(set(self.var_categories_list) & set(instance.var_categories_list)) > 0:
+        if len(set(self.dynamic_var_indices) & set(instance.dynamic_var_indices)) > 0:
             return True
         return False
 
@@ -1918,17 +1913,21 @@ class CircuitRoutines(ABC):
             operator,
             subsystem,
             op_in_eigenbasis=False,
-            evecs=bare_esys[subsystem_index][1]
-            if bare_esys
-            else subsystem.get_eigenstates(),
+            evecs=(
+                bare_esys[subsystem_index][1]
+                if bare_esys
+                else subsystem.get_eigenstates()
+            ),
         )
         return identity_wrap(
             operator,
             subsystem,
             self.subsystems,
-            evecs=bare_esys[subsystem_index][1]
-            if bare_esys
-            else subsystem.get_eigenstates(),
+            evecs=(
+                bare_esys[subsystem_index][1]
+                if bare_esys
+                else subsystem.get_eigenstates()
+            ),
         )
 
     @check_sync_status_circuit
@@ -1989,17 +1988,21 @@ class CircuitRoutines(ABC):
             operator,
             subsystem,
             op_in_eigenbasis=False,
-            evecs=bare_esys[subsystem_index][1]
-            if bare_esys
-            else subsystem.get_eigenstates(),
+            evecs=(
+                bare_esys[subsystem_index][1]
+                if bare_esys
+                else subsystem.get_eigenstates()
+            ),
         )
         return identity_wrap(
             operator,
             subsystem,
             self.subsystems,
-            evecs=bare_esys[subsystem_index][1]
-            if bare_esys
-            else subsystem.get_eigenstates(),
+            evecs=(
+                bare_esys[subsystem_index][1]
+                if bare_esys
+                else subsystem.get_eigenstates()
+            ),
         )
 
     # #################################################################
@@ -2078,9 +2081,11 @@ class CircuitRoutines(ABC):
         # replace all other operators with methods
         operator_symbols_list = flatten_list_recursive(
             [
-                list(short_op_dict.values())
-                if isinstance(short_op_dict, dict)
-                else short_op_dict
+                (
+                    list(short_op_dict.values())
+                    if isinstance(short_op_dict, dict)
+                    else short_op_dict
+                )
                 for short_op_dict in list(self.vars.values())
             ]
         )
@@ -2193,6 +2198,27 @@ class CircuitRoutines(ABC):
         )
 
     @check_sync_status_circuit
+    def _hamiltonian_for_purely_harmonic(self) -> csc_matrix:
+        """Hamiltonian for purely harmonic systems when ext_basis is set to harmonic
+
+        Returns:
+            csc_matrix:
+        """
+        if self.ext_basis != "harmonic":
+            raise Exception("The ext basis for this circuit is not set to harmonic.")
+        operator_for_var_index = []
+        for idx, var_index in enumerate(self.var_categories["extended"]):
+            cutoff = getattr(self, f"cutoff_ext_{var_index}")
+            evals = (0.5 + np.arange(0, cutoff)) * self.normal_mode_freqs[idx]
+            H_osc = sp.sparse.dia_matrix(
+                (evals, [0]), shape=(cutoff, cutoff), dtype=np.float_
+            )
+            operator_for_var_index.append(self._kron_operator(H_osc, var_index))
+        H = sum(operator_for_var_index)
+        return sp.sparse.dia_matrix(
+            (np.sort(H.diagonal()), [0]), shape=(cutoff, cutoff), dtype=np.float_
+        )
+
     def _eigenvals_for_purely_harmonic(self, evals_count: int):
         """
         Returns Hamiltonian for purely harmonic circuits. Hierarchical diagonalization
@@ -2203,32 +2229,9 @@ class CircuitRoutines(ABC):
         evals_count:
             Number of eigenenergies
         """
-        normal_mode_freqs = self.normal_mode_freqs
-        excitations = [np.arange(evals_count) for i in self.var_categories["extended"]]
-        energy_array = sum(
-            [
-                (grid + 0.5) * normal_mode_freqs[idx]
-                for idx, grid in enumerate(np.meshgrid(*excitations, indexing="ij"))
-            ]
-        )
-        excitation_indices = []
-        energies = []
-        num_oscs = len(self.var_categories["extended"])
-        for energy in np.unique(energy_array.flatten()):
-            if energy not in energies:
-                indices = np.where(energy_array == energy)
-                for idx in range(len(indices[0])):
-                    configuration = [
-                        indices[osc_index][idx] for osc_index in range(num_oscs)
-                    ]
-                    excitation_indices.append(configuration)
-                    energies.append(energy)
-                    if len(excitation_indices) == evals_count:
-                        break
-            if len(excitation_indices) >= evals_count:
-                break
-
-        return energies, excitation_indices
+        H = self._hamiltonian_for_purely_harmonic()
+        eigs = H.diagonal()
+        return eigs[:evals_count]
 
     @check_sync_status_circuit
     def hamiltonian(self) -> Union[csc_matrix, ndarray]:
@@ -2236,8 +2239,8 @@ class CircuitRoutines(ABC):
         Returns the Hamiltonian of the Circuit.
         """
         if not self.hierarchical_diagonalization:
-            if self.is_purely_harmonic:
-                return self._hamiltonian_for_harmonic_extended_vars()
+            if self.is_purely_harmonic and self.ext_basis == "harmonic":
+                return self._hamiltonian_for_purely_harmonic()
             else:
                 return self._evaluate_hamiltonian()
 
@@ -2373,7 +2376,7 @@ class CircuitRoutines(ABC):
         hilbertdim = self.hilbertdim()
 
         if self.is_purely_harmonic and not self.hierarchical_diagonalization:
-            return self._eigenvals_for_purely_harmonic(evals_count=evals_count)[0]
+            return self._eigenvals_for_purely_harmonic(evals_count=evals_count)
 
         hamiltonian_mat = self.hamiltonian()
         if self.type_of_matrices == "sparse":
@@ -2392,6 +2395,16 @@ class CircuitRoutines(ABC):
     def _esys_calc(self, evals_count: int) -> Tuple[ndarray, ndarray]:
         # dimension of the hamiltonian
         hilbertdim = self.hilbertdim()
+
+        if (
+            self.is_purely_harmonic
+            and (not self.hierarchical_diagonalization)
+            and self.ext_basis == "harmonic"
+        ):
+            return (
+                self._eigenvals_for_purely_harmonic(evals_count=evals_count),
+                np.identity(hilbertdim)[:, :evals_count],
+            )
 
         hamiltonian_mat = self.hamiltonian()
         if self.type_of_matrices == "sparse":
@@ -2565,7 +2578,7 @@ class CircuitRoutines(ABC):
             if isinstance(term, sm.Float):
                 expr_modified = expr_modified.subs(term, round(term, float_round))
 
-        for var_index in self.var_categories_list:
+        for var_index in self.dynamic_var_indices:
             # replace sinθ with sin(..) and similarly with cos
             expr_modified = (
                 expr_modified.replace(
@@ -3026,7 +3039,7 @@ class CircuitRoutines(ABC):
             ]
             wf_new_basis = wf_new_basis.reshape(flatten_list_recursive(wf_shape))
             for sub_subsys_index, sub_subsys in enumerate(subsystem.subsystems):
-                if len(set(relevant_indices) & set(sub_subsys.var_categories_list)) > 0:
+                if len(set(relevant_indices) & set(sub_subsys.dynamic_var_indices)) > 0:
                     wf_new_basis = self._recursive_basis_change(
                         wf_new_basis,
                         wf_dim + sub_subsys_index,
@@ -3034,12 +3047,14 @@ class CircuitRoutines(ABC):
                         relevant_indices=relevant_indices,
                     )
         else:
-            if len(set(relevant_indices) & set(subsystem.var_categories_list)) > 0:
+            if len(set(relevant_indices) & set(subsystem.dynamic_var_indices)) > 0:
                 wf_shape = list(wf_new_basis.shape)
                 wf_shape[wf_dim] = [
-                    getattr(subsystem, cutoff_attrib)
-                    if "ext" in cutoff_attrib
-                    else (2 * getattr(subsystem, cutoff_attrib) + 1)
+                    (
+                        getattr(subsystem, cutoff_attrib)
+                        if "ext" in cutoff_attrib
+                        else (2 * getattr(subsystem, cutoff_attrib) + 1)
+                    )
                     for cutoff_attrib in subsystem.cutoff_names
                 ]
                 wf_new_basis = wf_new_basis.reshape(flatten_list_recursive(wf_shape))
@@ -3097,30 +3112,30 @@ class CircuitRoutines(ABC):
     def _get_var_dim_for_reshaped_wf(self, wf_var_indices, var_index):
         wf_dim = 0
         if not self.hierarchical_diagonalization:
-            return self.var_categories_list.index(var_index)
+            return self.dynamic_var_indices.index(var_index)
         for subsys in self.subsystems:
-            intersection = list_intersection(subsys.var_categories_list, wf_var_indices)
+            intersection = list_intersection(subsys.dynamic_var_indices, wf_var_indices)
             if len(intersection) > 0 and var_index not in intersection:
                 if subsys.hierarchical_diagonalization:
                     wf_dim += subsys._get_var_dim_for_reshaped_wf(
                         wf_var_indices, var_index
                     )
                 else:
-                    wf_dim += len(subsys.var_categories_list)
+                    wf_dim += len(subsys.dynamic_var_indices)
             elif len(intersection) > 0 and var_index in intersection:
                 if subsys.hierarchical_diagonalization:
                     wf_dim += subsys._get_var_dim_for_reshaped_wf(
                         wf_var_indices, var_index
                     )
                 else:
-                    wf_dim += subsys.var_categories_list.index(var_index)
+                    wf_dim += subsys.dynamic_var_indices.index(var_index)
                 break
             else:
                 wf_dim += 1
         return wf_dim
 
     def _dims_to_be_summed(self, var_indices: Tuple[int], num_wf_dims) -> List[int]:
-        all_var_indices = self.var_categories_list
+        all_var_indices = self.dynamic_var_indices
         non_summed_dims = []
         for var_index in all_var_indices:
             if var_index in var_indices:
@@ -3137,8 +3152,8 @@ class CircuitRoutines(ABC):
         Then reshapes the wavefunction to represent each of the variable indices as a separate dimension.
         """
         if self.hierarchical_diagonalization:
-            system_hierarchy_for_vars_chosen = list(
-                set([self.get_subsystem_index(index) for index in var_indices])
+            system_hierarchy_for_vars_chosen = unique_elements_in_list(
+                [self.get_subsystem_index(index) for index in var_indices]
             )  # getting the subsystem index for each of the variable indices
 
             subsys_trunc_dims = [sys.truncated_dim for sys in self.subsystems]
@@ -3151,7 +3166,7 @@ class CircuitRoutines(ABC):
                 wf_dim = 0
                 for sys_index in range(subsys_index):
                     if sys_index in system_hierarchy_for_vars_chosen:
-                        wf_dim += len(self.subsystems[sys_index].var_categories_list)
+                        wf_dim += len(self.subsystems[sys_index].dynamic_var_indices)
                     else:
                         wf_dim += 1
                 wf_original_basis = self._recursive_basis_change(
@@ -3163,9 +3178,11 @@ class CircuitRoutines(ABC):
         else:
             wf_original_basis = wf.reshape(
                 *[
-                    getattr(self, cutoff_attrib)
-                    if "ext" in cutoff_attrib
-                    else (2 * getattr(self, cutoff_attrib) + 1)
+                    (
+                        getattr(self, cutoff_attrib)
+                        if "ext" in cutoff_attrib
+                        else (2 * getattr(self, cutoff_attrib) + 1)
+                    )
                     for cutoff_attrib in self.cutoff_names
                 ]
             )
@@ -3199,7 +3216,7 @@ class CircuitRoutines(ABC):
         for var_index in var_indices:
             # finding the dimension corresponding to the var_index
             if not self.hierarchical_diagonalization:
-                wf_dim = self.var_categories_list.index(var_index)
+                wf_dim = self.dynamic_var_indices.index(var_index)
             else:
                 wf_dim = self._get_var_dim_for_reshaped_wf(var_indices, var_index)
 
@@ -3342,17 +3359,11 @@ class CircuitRoutines(ABC):
                 )
             else:
                 var_index_dims_dict[var_index] = getattr(self, cutoff_attrib)
-                if ext_basis == "harmonic":
-                    grid = (
-                        grids_per_varindex_dict[var_index]
-                        if var_index in grids_per_varindex_dict
-                        else self._default_grid_phi
-                    )
-                elif ext_basis == "discretized":
+                if ext_basis == "harmonic" or "discretized":
                     grid = discretization.Grid1d(
                         self.discretized_phi_range[var_index][0],
                         self.discretized_phi_range[var_index][1],
-                        cutoffs_dict[var_index],
+                        cutoffs_dict[var_index] if ext_basis == "discretized" else 200,
                     )
                 grids_per_varindex_dict[var_index] = grid
 

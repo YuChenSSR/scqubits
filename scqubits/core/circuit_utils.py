@@ -22,7 +22,11 @@ from scipy import sparse
 from scipy.sparse import csc_matrix
 
 from scqubits.core import discretization as discretization
-from scqubits.utils.misc import flatten_list_recursive, is_string_float
+from scqubits.utils.misc import (
+    flatten_list_recursive,
+    is_string_float,
+    unique_elements_in_list,
+)
 from scqubits.core import circuit_input
 
 if TYPE_CHECKING:
@@ -86,9 +90,7 @@ def sawtooth_potential(phi_pts):
     N = 1000
     V = np.zeros_like(phi_pts)
     for idx in range(1, N + 1):
-        V += (
-            (skewness + 1) * (-skewness) ** (idx - 1) * np.cos(idx * phi_pts) / idx**2
-        )
+        V += (skewness + 1) * (-skewness) ** (idx - 1) * np.cos(idx * phi_pts) / idx**2
     return -V
 
 
@@ -444,7 +446,7 @@ def keep_terms_for_subsystem(sym_expr, subsys, substitute_zero=False):
         var_indices = [
             get_trailing_number(sym_var.name) for sym_var in list(term.free_symbols)
         ]
-        if len(set(var_indices) & set(subsys.var_categories_list)) == 0:
+        if len(set(var_indices) & set(subsys.dynamic_var_indices)) == 0:
             sym_expr = sym_expr - term
     return sym_expr
 
@@ -650,7 +652,9 @@ def assemble_circuit(
             [subcircuit_branch[1], subcircuit_branch[2]]
             for subcircuit_branch in subcircuit_branches
         ]
-        subcircuit_nodes = [*set(flatten_list_recursive(subcircuit_nodes))]
+        subcircuit_nodes = [
+            *unique_elements_in_list(flatten_list_recursive(subcircuit_nodes))
+        ]
         # add node indices of each subcircuit to a single list
         subcircuit_nodes_list.append(subcircuit_nodes)
         # add total node number of each subcircuit to a single list
