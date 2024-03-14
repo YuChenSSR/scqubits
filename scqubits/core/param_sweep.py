@@ -1023,6 +1023,8 @@ class ParameterSweep(  # type:ignore
     def faulty_interactionterm_suspected(self) -> bool:
         """Check if any interaction terms are specified as fixed matrices"""
         for interactionterm in self._hilbertspace.interaction_list:
+            if isinstance(interactionterm, (ndarray, Qobj, csc_matrix)):
+                return True
             for idx_operator in interactionterm.operator_list:
                 if isinstance(idx_operator[1], (ndarray, Qobj, csc_matrix)):
                     return True
@@ -1106,7 +1108,7 @@ class ParameterSweep(  # type:ignore
         bare_evals = np.empty((self.subsystem_count,), dtype=object)
         bare_evecs = np.empty((self.subsystem_count,), dtype=object)
         # creating data arrays for subsystems, to store the esys for all subsystems when HD is used
-        circuit_esys = []
+        circuit_esys = np.empty((self.subsystem_count,), dtype=object)
 
         for subsys_index, subsystem in enumerate(self.hilbertspace):
             bare_esys = self._subsys_bare_spectrum_sweep(subsystem)
@@ -1130,12 +1132,16 @@ class ParameterSweep(  # type:ignore
                 np.asarray(evecs.tolist()),
                 self._parameters.paramvals_by_name,
             )
-            circuit_esys.append(bare_esys)
+            circuit_esys[subsys_index] = (
+                bare_esys  # when param =(p0, p1, p2, ...), subsys i esys is circuit_esys[i][p0, p1, p3, ...]
+            )
 
         return (
             NamedSlotsNdarray(bare_evals, {"subsys": np.arange(self.subsystem_count)}),
             NamedSlotsNdarray(bare_evecs, {"subsys": np.arange(self.subsystem_count)}),
-            circuit_esys,
+            NamedSlotsNdarray(
+                circuit_esys, {"subsys": np.arange(self.subsystem_count)}
+            ),
         )
 
     def _update_subsys_compute_esys(

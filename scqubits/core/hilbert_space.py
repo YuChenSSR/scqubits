@@ -821,7 +821,9 @@ class HilbertSpace(
         hamiltonian += self.interaction_hamiltonian(bare_esys=bare_esys)
         return hamiltonian
 
-    def bare_hamiltonian(self, bare_esys: Optional[Dict[int, ndarray]] = None) -> qt.Qobj:
+    def bare_hamiltonian(
+        self, bare_esys: Optional[Dict[int, ndarray]] = None
+    ) -> qt.Qobj:
         """
         Parameters
         ----------
@@ -834,7 +836,11 @@ class HilbertSpace(
             composite Hamiltonian composed of bare Hamiltonians of subsystems
             independent of the external parameter
         """
-        bare_hamiltonian = qt.Qobj(0, dims=[self.subsystem_dims]*2) if qt.__version__ >= '5.0.0' else qt.Qobj(0)
+        bare_hamiltonian = (
+            qt.Qobj(0, dims=[self.subsystem_dims] * 2)
+            if qt.__version__ >= "5.0.0"
+            else qt.Qobj(0)
+        )
         for subsys_index, subsys in enumerate(self):
             if bare_esys is not None and subsys_index in bare_esys:
                 evals = bare_esys[subsys_index][0]
@@ -861,7 +867,11 @@ class HilbertSpace(
             interaction Hamiltonian
         """
         if not self.interaction_list:
-            return qt.Qobj(0, dims=[self.subsystem_dims]*2) if qt.__version__ >= '5.0.0' else qt.Qobj(0)
+            return (
+                qt.Qobj(0, dims=[self.subsystem_dims] * 2)
+                if qt.__version__ >= "5.0.0"
+                else qt.Qobj(0)
+            )
 
         operator_list = []
         for term in self.interaction_list:
@@ -1047,7 +1057,7 @@ class HilbertSpace(
         Standardize the phases of the (dressed) eigenvectors.
         """
         for idx, evec in enumerate(self._data["evecs"][0]):
-            array = evec.data.to_array() if qt.__version__ >= '5.0.0' else evec.data.toarray()
+            array = utils.Qobj_to_scipy_csc_matrix(evec)
             phase = spec_utils.extract_phase(array)
             self._data["evecs"][0][idx] = evec * np.exp(-1j * phase)
 
@@ -1105,7 +1115,9 @@ class HilbertSpace(
             evecs=bare_evecs,
         )
         dressed_evecs = self._data["evecs"][0]
-        dressed_op_data = id_wrapped_op.transform(dressed_evecs).data.to_array() if qt.__version__ >= '5.0.0' else id_wrapped_op.transform(dressed_evecs).data.toarray()
+        dressed_op_data = utils.Qobj_to_scipy_csc_matrix(
+            id_wrapped_op.transform(dressed_evecs)
+        )
         dressed_op_truncated = qt.Qobj(
             dressed_op_data[0:truncated_dim, 0:truncated_dim],
             dims=[[truncated_dim], [truncated_dim]],
